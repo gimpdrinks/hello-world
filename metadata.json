@@ -1,0 +1,5 @@
+{
+  "name": "Legacy RTF to HTML Converter",
+  "description": "A specialized tool for converting Rich Text and RTF data into strict, legacy-compatible HTML snippets (<b>, <i>, <p>, <br>) without CSS or attributes.",
+  "requestFramePermissions": []
+}
