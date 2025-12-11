@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { Eye, Code, Copy, Check } from 'lucide-react';
+import DOMPurify from 'dompurify';
 
 interface LegacyProps {
   html: string;
@@ -42,6 +43,7 @@ export const LegacyCodeViewer: React.FC<LegacyProps> = ({ html }) => {
         <button
           onClick={handleCopy}
           disabled={!html}
+          aria-label={copied ? "Content copied to clipboard" : "Copy HTML code to clipboard"}
           className={`
             flex items-center gap-1.5 px-4 py-1.5 rounded-md text-xs font-bold uppercase tracking-wide transition-all duration-200 shadow-sm
             ${copied 
@@ -65,16 +67,23 @@ export const LegacyCodeViewer: React.FC<LegacyProps> = ({ html }) => {
 };
 
 export const LegacyVisualPreview: React.FC<LegacyProps> = ({ html }) => {
+  const sanitizedHtml = useMemo(() => {
+    return DOMPurify.sanitize(html, {
+      ALLOWED_TAGS: ['b', 'i', 'u', 'strong', 'em', 'p', 'br', 'ul', 'ol', 'li', 'sub', 'sup', 'span'],
+      ALLOWED_ATTR: [] // Legacy systems usually don't support attributes
+    });
+  }, [html]);
+
   const stats = useMemo(() => {
-      if (!html) return { words: 0, chars: 0 };
+      if (!sanitizedHtml) return { words: 0, chars: 0 };
       const temp = document.createElement('div');
-      temp.innerHTML = html;
+      temp.innerHTML = sanitizedHtml;
       const txt = temp.textContent || "";
       return {
           words: getWordCount(txt),
           chars: txt.length
       };
-  }, [html]);
+  }, [sanitizedHtml]);
 
   return (
     <div className="flex flex-col h-full bg-white border border-slate-300 rounded-lg shadow-sm overflow-hidden">
@@ -89,11 +98,11 @@ export const LegacyVisualPreview: React.FC<LegacyProps> = ({ html }) => {
         <span className="text-[10px] text-slate-400 ml-auto self-start mt-0.5">How it looks in legacy system</span>
       </div>
       <div className="flex-1 p-8 overflow-y-auto bg-white min-h-[400px]">
-        {html ? (
+        {sanitizedHtml ? (
           <div 
-            className="prose prose-sm max-w-none text-black"
+            className="prose prose-sm max-w-none text-black [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5"
             style={{ fontFamily: 'Arial, sans-serif', fontSize: '14px', lineHeight: '1.5' }} 
-            dangerouslySetInnerHTML={{ __html: html }} 
+            dangerouslySetInnerHTML={{ __html: sanitizedHtml }} 
           />
         ) : (
           <div className="h-full flex flex-col items-center justify-center text-slate-300">

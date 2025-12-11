@@ -1,11 +1,16 @@
 import { GoogleGenAI } from "@google/genai";
+import { ConversionConfig } from "../types";
 
-export const cleanWithGemini = async (input: string): Promise<string> => {
+export const cleanWithGemini = async (input: string, config: ConversionConfig): Promise<string> => {
   if (!process.env.API_KEY) {
     throw new Error("API Key is missing");
   }
 
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+
+  const paragraphRule = config.useParagraphs 
+    ? "Paragraphs -> <p>" 
+    : "Paragraphs -> <br><br> (Do NOT use <p> tags)";
 
   const systemPrompt = `
     You are a strictly compliant Legacy HTML Converter. 
@@ -18,7 +23,7 @@ export const cleanWithGemini = async (input: string): Promise<string> => {
        - Bold/Strong -> <b>
        - Italic/Em -> <i>
        - Underline/Ins -> <u>
-       - Paragraphs -> <p>
+       - ${paragraphRule}
     4. Clean up whitespace. Do not leave empty tags like <b></b>.
     5. Return ONLY the HTML snippet. Do not wrap in markdown code blocks. Do not add <html> or <body> tags.
   `;

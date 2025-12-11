@@ -1,4 +1,5 @@
 export interface ConversionConfig {
+  mode: 'standard' | 'ai';
   useParagraphs: boolean; // If true, use <p>, else use <br><br>
   convertDivsToP: boolean;
   cleanAttributes: boolean;

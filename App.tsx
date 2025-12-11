@@ -1,11 +1,20 @@
-import React, { useState, useRef } from 'react';
+import React, { useState } from 'react';
 import { 
   HelpCircle, Settings, Undo, Redo, Eraser, Play, AlertTriangle, 
   Bold, Italic, Underline, List, ListOrdered, 
   AlignLeft, AlignCenter, AlignRight, 
-  Indent, Outdent, Superscript, Subscript
+  Indent, Outdent, Superscript, Subscript,
+  Loader2
 } from 'lucide-react';
+import { useEditor, EditorContent } from '@tiptap/react';
+import StarterKit from '@tiptap/starter-kit';
+import UnderlineExtension from '@tiptap/extension-underline';
+import TextAlign from '@tiptap/extension-text-align';
+import SubscriptExtension from '@tiptap/extension-subscript';
+import SuperscriptExtension from '@tiptap/extension-superscript';
+
 import { cleanHtml } from './services/cleanerService';
+import { cleanWithGemini } from './services/geminiService';
 import { LegacyCodeViewer, LegacyVisualPreview } from './components/LegacyOutput';
 import { HelpModal } from './components/HelpModal';
 import { SettingsModal } from './components/SettingsModal';
@@ -14,6 +23,7 @@ import { ConversionConfig } from './types';
 const App: React.FC = () => {
   // Configuration State
   const [config, setConfig] = useState<ConversionConfig>({
+    mode: 'standard',
     useParagraphs: true,
     convertDivsToP: true,
     cleanAttributes: true,
@@ -24,142 +34,81 @@ const App: React.FC = () => {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  
-  // Editor & History State
-  const editorRef = useRef<HTMLDivElement>(null);
-  const [history, setHistory] = useState<string[]>(['']);
-  const [historyIndex, setHistoryIndex] = useState(0);
+  const [isLoading, setIsLoading] = useState(false);
   const [inputStats, setInputStats] = useState({ words: 0, chars: 0 });
-  
-  const debounceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // --- History Management ---
-
-  const addToHistory = (newContent: string) => {
-    setHistory((prev) => {
-      const currentContent = prev[historyIndex];
-      // Avoid duplicate states
-      if (currentContent === newContent) return prev;
-
-      // Slice history if we are in the middle of the stack
-      const newHistory = prev.slice(0, historyIndex + 1);
-      return [...newHistory, newContent];
-    });
-    setHistoryIndex((prev) => prev + 1);
-  };
-
-  const calculateInputStats = () => {
-    if (!editorRef.current) return;
-    const text = editorRef.current.innerText || "";
-    const words = text.trim().split(/\s+/).filter(w => w.length > 0).length;
-    const chars = text.length;
-    setInputStats({ words, chars });
-  };
-
-  const handleInput = () => {
-    if (!editorRef.current) return;
-    const content = editorRef.current.innerHTML;
-
-    calculateInputStats();
-
-    if (debounceTimeoutRef.current) {
-      clearTimeout(debounceTimeoutRef.current);
-    }
-
-    debounceTimeoutRef.current = setTimeout(() => {
-      addToHistory(content);
-    }, 750);
-  };
-
-  const handleUndo = () => {
-    if (historyIndex > 0) {
-      const newIndex = historyIndex - 1;
-      const previousContent = history[newIndex];
-      setHistoryIndex(newIndex);
-      if (editorRef.current) {
-        editorRef.current.innerHTML = previousContent;
-        calculateInputStats();
-      }
-    }
-  };
-
-  const handleRedo = () => {
-    if (historyIndex < history.length - 1) {
-      const newIndex = historyIndex + 1;
-      const nextContent = history[newIndex];
-      setHistoryIndex(newIndex);
-      if (editorRef.current) {
-        editorRef.current.innerHTML = nextContent;
-        calculateInputStats();
-      }
-    }
-  };
+  // --- Tiptap Editor Setup ---
+  const editor = useEditor({
+    extensions: [
+      StarterKit,
+      UnderlineExtension,
+      SubscriptExtension,
+      SuperscriptExtension,
+      TextAlign.configure({
+        types: ['heading', 'paragraph'],
+      }),
+    ],
+    content: '',
+    editorProps: {
+      attributes: {
+        class: 'w-full h-full p-4 outline-none overflow-y-auto text-slate-800 focus:bg-indigo-50/10 transition-colors prose prose-sm max-w-none [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5 [&_p]:my-1',
+        'data-placeholder': 'Type here or paste text from Word/Outlook...',
+        'aria-label': 'Rich Text Editor Input',
+        'aria-multiline': 'true',
+        role: 'textbox',
+      },
+    },
+    onUpdate: ({ editor }) => {
+      const text = editor.getText();
+      const words = text.trim().split(/\s+/).filter(w => w.length > 0).length;
+      const chars = text.length;
+      setInputStats({ words, chars });
+    },
+  });
 
   const handleClear = () => {
-    if (!editorRef.current) return;
-    
-    const currentContent = editorRef.current.innerHTML;
-    if (currentContent !== history[historyIndex]) {
-       addToHistory(currentContent);
-       setTimeout(() => {
-         addToHistory('');
-         setHistoryIndex(prev => prev + 1); 
-       }, 0);
-    } else {
-       addToHistory('');
-    }
-
-    editorRef.current.innerHTML = '';
-    calculateInputStats();
+    if (!editor) return;
+    editor.commands.setContent('');
+    setInputStats({ words: 0, chars: 0 });
     setOutputHtml('');
     setErrorMsg(null);
   };
 
-  // --- Editor Formatting ---
-  const execCmd = (command: string, value?: string) => {
-    // Ensure the editor has focus before executing command
-    if (editorRef.current && document.activeElement !== editorRef.current) {
-       editorRef.current.focus();
-    }
-    
-    document.execCommand(command, false, value);
-    
-    if (editorRef.current) {
-      handleInput(); // Trigger history save & stats update
-    }
-  };
-
   // --- Conversion Logic ---
-
-  const handleConvert = () => {
-    if (!editorRef.current) return;
+  const handleConvert = async () => {
+    if (!editor) return;
 
     setErrorMsg(null);
-    const rawInput = editorRef.current.innerHTML;
+    // Use getHTML() to retrieve the HTML content from Tiptap
+    const rawInput = editor.getHTML();
     
-    if (!rawInput.trim()) {
+    // Basic empty check (Tiptap usually returns <p></p> for empty)
+    if (!editor.getText().trim()) {
       return;
     }
 
-    const result = cleanHtml(rawInput, config);
-    
-    if (result.error) {
-      setErrorMsg(result.error);
-      setOutputHtml('');
+    if (config.mode === 'ai') {
+      setIsLoading(true);
+      try {
+        const resultHtml = await cleanWithGemini(rawInput, config);
+        setOutputHtml(resultHtml);
+      } catch (e) {
+        console.error(e);
+        setErrorMsg("AI Conversion failed. Ensure API key is set or try Standard mode.");
+      } finally {
+        setIsLoading(false);
+      }
     } else {
-      setOutputHtml(result.html);
+      // Standard Logic
+      const result = cleanHtml(rawInput, config);
+      
+      if (result.error) {
+        setErrorMsg(result.error);
+        setOutputHtml('');
+      } else {
+        setOutputHtml(result.html);
+      }
     }
-  };
-
-  const handlePaste = (e: React.ClipboardEvent<HTMLDivElement>) => {
-    // Allow the paste to happen, then calculate stats
-    if (debounceTimeoutRef.current) clearTimeout(debounceTimeoutRef.current);
-    setTimeout(() => {
-       if (editorRef.current) {
-         addToHistory(editorRef.current.innerHTML);
-         calculateInputStats();
-       }
-    }, 100);
   };
 
   // --- Toolbar Component Helper ---
@@ -167,13 +116,26 @@ const App: React.FC = () => {
     icon: Icon, 
     onClick, 
     title, 
-    disabled = false 
-  }: { icon: React.ElementType, onClick: () => void, title: string, disabled?: boolean }) => (
+    disabled = false,
+    isActive = false
+  }: { 
+    icon: React.ElementType, 
+    onClick: () => void, 
+    title: string, 
+    disabled?: boolean,
+    isActive?: boolean
+  }) => (
     <button 
       onMouseDown={(e) => e.preventDefault()} 
       onClick={onClick} 
       disabled={disabled}
-      className="p-1.5 text-slate-600 hover:text-indigo-600 hover:bg-white border border-transparent hover:border-slate-200 hover:shadow-sm rounded transition-all disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:border-transparent" 
+      aria-label={title}
+      aria-pressed={isActive}
+      className={`p-1.5 border rounded transition-all disabled:opacity-30 disabled:cursor-not-allowed 
+        ${isActive 
+          ? 'bg-indigo-100 text-indigo-700 border-indigo-200 shadow-inner' 
+          : 'text-slate-600 hover:text-indigo-600 hover:bg-white border-transparent hover:border-slate-200 hover:shadow-sm'
+        }`}
       title={title}
     >
       <Icon className="w-4 h-4" />
@@ -181,6 +143,10 @@ const App: React.FC = () => {
   );
 
   const Divider = () => <div className="w-px h-4 bg-slate-300 mx-1" />;
+
+  if (!editor) {
+    return null;
+  }
 
   return (
     <div className="min-h-screen bg-slate-100 flex flex-col font-sans">
@@ -198,8 +164,8 @@ const App: React.FC = () => {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 h-24 flex items-center justify-between relative">
           
           <div className="flex flex-col z-20">
-             <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-white leading-tight">Hello World</h1>
-             <span className="text-xs text-indigo-300 font-medium tracking-wide">Legacy RTF Converter</span>
+             <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-white leading-tight">Legacy Converter</h1>
+             <span className="text-xs text-indigo-300 font-medium tracking-wide">Clean RTF to HTML Tool</span>
           </div>
 
           <div className="absolute left-1/2 top-1/2 transform -translate-x-1/2 -translate-y-1/2 z-10">
@@ -213,6 +179,7 @@ const App: React.FC = () => {
           <div className="flex items-center gap-2 sm:gap-4 z-20">
             <button 
               onClick={() => setIsSettingsOpen(true)}
+              aria-label="Open Settings"
               className="flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium text-slate-300 hover:text-white hover:bg-slate-800 transition-colors"
             >
               <Settings className="w-4 h-4" />
@@ -220,6 +187,7 @@ const App: React.FC = () => {
             </button>
             <button 
               onClick={() => setIsHelpOpen(true)}
+              aria-label="Open User Guide"
               className="flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium text-slate-300 hover:text-white hover:bg-slate-800 transition-colors"
             >
               <HelpCircle className="w-4 h-4" />
@@ -239,7 +207,11 @@ const App: React.FC = () => {
               <h3 className="text-sm font-bold text-red-800">Conversion Failed</h3>
               <p className="text-sm text-red-700 mt-1">{errorMsg}</p>
             </div>
-            <button onClick={() => setErrorMsg(null)} className="ml-auto text-red-400 hover:text-red-600">
+            <button 
+              onClick={() => setErrorMsg(null)} 
+              aria-label="Dismiss Error"
+              className="ml-auto text-red-400 hover:text-red-600"
+            >
               <span className="sr-only">Dismiss</span>
               <Eraser className="w-4 h-4" />
             </button>
@@ -260,7 +232,12 @@ const App: React.FC = () => {
                     {inputStats.words} words | {inputStats.chars} chars
                   </div>
                 </div>
-                <button onClick={handleClear} className="text-slate-400 hover:text-red-600 transition-colors p-1" title="Clear All">
+                <button 
+                  onClick={handleClear} 
+                  aria-label="Clear Editor Content"
+                  className="text-slate-400 hover:text-red-600 transition-colors p-1" 
+                  title="Clear All"
+                >
                     <Eraser className="w-4 h-4" />
                 </button>
              </div>
@@ -268,68 +245,139 @@ const App: React.FC = () => {
              {/* Editor Toolbar */}
              <div className="bg-slate-50 border-b border-slate-200 px-2 py-2 flex items-center flex-wrap gap-y-2 flex-shrink-0">
                 
-                {/* History */}
+                {/* History (Built-in Tiptap) */}
                 <div className="flex items-center">
-                  <ToolbarButton icon={Undo} onClick={handleUndo} title="Undo (Ctrl+Z)" disabled={historyIndex === 0} />
-                  <ToolbarButton icon={Redo} onClick={handleRedo} title="Redo (Ctrl+Y)" disabled={historyIndex >= history.length - 1} />
+                  <ToolbarButton 
+                    icon={Undo} 
+                    onClick={() => editor.chain().focus().undo().run()} 
+                    title="Undo (Ctrl+Z)" 
+                    disabled={!editor.can().undo()} 
+                  />
+                  <ToolbarButton 
+                    icon={Redo} 
+                    onClick={() => editor.chain().focus().redo().run()} 
+                    title="Redo (Ctrl+Y)" 
+                    disabled={!editor.can().redo()} 
+                  />
                 </div>
                 
                 <Divider />
 
                 {/* Character Formatting */}
                 <div className="flex items-center">
-                  <ToolbarButton icon={Bold} onClick={() => execCmd('bold')} title="Bold (Ctrl+B)" />
-                  <ToolbarButton icon={Italic} onClick={() => execCmd('italic')} title="Italic (Ctrl+I)" />
-                  <ToolbarButton icon={Underline} onClick={() => execCmd('underline')} title="Underline (Ctrl+U)" />
-                  <ToolbarButton icon={Subscript} onClick={() => execCmd('subscript')} title="Subscript" />
-                  <ToolbarButton icon={Superscript} onClick={() => execCmd('superscript')} title="Superscript" />
+                  <ToolbarButton 
+                    icon={Bold} 
+                    onClick={() => editor.chain().focus().toggleBold().run()} 
+                    title="Bold (Ctrl+B)" 
+                    isActive={editor.isActive('bold')} 
+                  />
+                  <ToolbarButton 
+                    icon={Italic} 
+                    onClick={() => editor.chain().focus().toggleItalic().run()} 
+                    title="Italic (Ctrl+I)" 
+                    isActive={editor.isActive('italic')} 
+                  />
+                  <ToolbarButton 
+                    icon={Underline} 
+                    onClick={() => editor.chain().focus().toggleUnderline().run()} 
+                    title="Underline (Ctrl+U)" 
+                    isActive={editor.isActive('underline')} 
+                  />
+                  <ToolbarButton 
+                    icon={Subscript} 
+                    onClick={() => editor.chain().focus().toggleSubscript().run()} 
+                    title="Subscript" 
+                    isActive={editor.isActive('subscript')} 
+                  />
+                  <ToolbarButton 
+                    icon={Superscript} 
+                    onClick={() => editor.chain().focus().toggleSuperscript().run()} 
+                    title="Superscript" 
+                    isActive={editor.isActive('superscript')} 
+                  />
                 </div>
 
                 <Divider />
 
                 {/* Alignment */}
                 <div className="flex items-center">
-                  <ToolbarButton icon={AlignLeft} onClick={() => execCmd('justifyLeft')} title="Align Left" />
-                  <ToolbarButton icon={AlignCenter} onClick={() => execCmd('justifyCenter')} title="Center" />
-                  <ToolbarButton icon={AlignRight} onClick={() => execCmd('justifyRight')} title="Align Right" />
+                  <ToolbarButton 
+                    icon={AlignLeft} 
+                    onClick={() => editor.chain().focus().setTextAlign('left').run()} 
+                    title="Align Left" 
+                    isActive={editor.isActive({ textAlign: 'left' })} 
+                  />
+                  <ToolbarButton 
+                    icon={AlignCenter} 
+                    onClick={() => editor.chain().focus().setTextAlign('center').run()} 
+                    title="Center" 
+                    isActive={editor.isActive({ textAlign: 'center' })} 
+                  />
+                  <ToolbarButton 
+                    icon={AlignRight} 
+                    onClick={() => editor.chain().focus().setTextAlign('right').run()} 
+                    title="Align Right" 
+                    isActive={editor.isActive({ textAlign: 'right' })} 
+                  />
                 </div>
 
                 <Divider />
 
                 {/* Lists & Indentation */}
                 <div className="flex items-center">
-                  <ToolbarButton icon={List} onClick={() => execCmd('insertUnorderedList')} title="Bullet List" />
-                  <ToolbarButton icon={ListOrdered} onClick={() => execCmd('insertOrderedList')} title="Numbered List" />
-                  <ToolbarButton icon={Indent} onClick={() => execCmd('indent')} title="Increase Indent" />
-                  <ToolbarButton icon={Outdent} onClick={() => execCmd('outdent')} title="Decrease Indent" />
+                  <ToolbarButton 
+                    icon={List} 
+                    onClick={() => editor.chain().focus().toggleBulletList().run()} 
+                    title="Bullet List" 
+                    isActive={editor.isActive('bulletList')} 
+                  />
+                  <ToolbarButton 
+                    icon={ListOrdered} 
+                    onClick={() => editor.chain().focus().toggleOrderedList().run()} 
+                    title="Numbered List" 
+                    isActive={editor.isActive('orderedList')} 
+                  />
+                  <ToolbarButton 
+                    icon={Indent} 
+                    onClick={() => editor.chain().focus().sinkListItem('listItem').run()} 
+                    title="Increase Indent (Lists)" 
+                    disabled={!editor.can().sinkListItem('listItem')} 
+                  />
+                  <ToolbarButton 
+                    icon={Outdent} 
+                    onClick={() => editor.chain().focus().liftListItem('listItem').run()} 
+                    title="Decrease Indent (Lists)" 
+                    disabled={!editor.can().liftListItem('listItem')} 
+                  />
                 </div>
 
              </div>
              
-             <div className="flex-1 relative overflow-hidden">
-                <div 
-                  ref={editorRef}
-                  contentEditable
-                  onInput={handleInput}
-                  onPaste={handlePaste}
-                  className="w-full h-full p-4 outline-none overflow-y-auto text-slate-800 focus:bg-indigo-50/10 transition-colors 
-                             [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5 
-                             [&_b]:font-bold [&_strong]:font-bold [&_i]:italic [&_em]:italic 
-                             [&_u]:underline 
-                             [&_h1]:text-2xl [&_h1]:font-bold [&_h2]:text-xl [&_h2]:font-bold [&_h3]:text-lg [&_h3]:font-bold
-                             [&_sub]:align-sub [&_sub]:text-xs [&_sup]:align-super [&_sup]:text-xs"
-                  data-placeholder="Type here or paste text from Word/Outlook..."
-                />
+             <div className="flex-1 relative overflow-hidden bg-white">
+                <EditorContent editor={editor} className="h-full" />
              </div>
 
              {/* Footer with Convert Button */}
              <div className="bg-slate-50 border-t border-slate-200 p-4 flex justify-end flex-shrink-0">
                 <button
                   onClick={handleConvert}
-                  className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-6 rounded-lg shadow-md transition-all transform active:scale-95 hover:shadow-lg"
+                  disabled={isLoading}
+                  aria-label={isLoading ? "Converting content..." : "Convert content to HTML"}
+                  className={`flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-6 rounded-lg shadow-md transition-all transform active:scale-95 hover:shadow-lg ${
+                    isLoading ? 'opacity-70 cursor-wait' : ''
+                  }`}
                 >
-                  <Play className="w-4 h-4 fill-current" />
-                  Convert to HTML
+                  {isLoading ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Converting...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Play className="w-4 h-4 fill-current" />
+                      <span>Convert to HTML</span>
+                    </>
+                  )}
                 </button>
              </div>
           </div>
